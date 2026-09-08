@@ -6,6 +6,7 @@ const ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Client {
     Music,
+    Web,
     Tv,
     VisionOs,
 }
@@ -14,6 +15,7 @@ impl Client {
     pub fn name(self) -> &'static str {
         match self {
             Self::Music => "WEB_REMIX",
+            Self::Web => "WEB",
             Self::Tv => "TVHTML5",
             Self::VisionOs => "VISIONOS",
         }
@@ -22,6 +24,7 @@ impl Client {
     pub fn version(self) -> &'static str {
         match self {
             Self::Music => "1.20260707.12.00",
+            Self::Web => "2.20260707.00.00",
             Self::Tv => "7.20260707.07.00",
             Self::VisionOs => "1.02",
         }
@@ -30,6 +33,7 @@ impl Client {
     pub fn id(self) -> u32 {
         match self {
             Self::Music => 67,
+            Self::Web => 1,
             Self::Tv => 7,
             Self::VisionOs => 101,
         }
@@ -37,7 +41,7 @@ impl Client {
 
     pub fn user_agent(self) -> &'static str {
         match self {
-            Self::Music => {
+            Self::Music | Self::Web => {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             }
             Self::Tv => "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
@@ -58,14 +62,17 @@ impl Client {
             "utcOffsetMinutes": 0,
         });
         let extra = match self {
-            Self::Music => json!({
+            Self::Music | Self::Web => json!({
                 "osName": "Windows",
                 "osVersion": "10.0",
                 "platform": "DESKTOP",
                 "clientFormFactor": "UNKNOWN_FORM_FACTOR",
                 "browserName": "Chrome",
                 "browserVersion": "125.0.0.0",
-                "originalUrl": "https://music.youtube.com",
+                "originalUrl": match self {
+                    Self::Web => "https://www.youtube.com",
+                    _ => "https://music.youtube.com",
+                },
             }),
             Self::Tv => json!({
                 "platform": "TV",

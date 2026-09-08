@@ -120,6 +120,22 @@ pub struct Profile {
     pub thumbnails: Vec<Thumbnail>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Identity {
+    pub profile: Profile,
+    pub page_id: Option<String>,
+}
+
+impl Identity {
+    pub fn key(&self) -> String {
+        match (&self.page_id, &self.profile.email) {
+            (Some(page), _) => page.clone(),
+            (None, Some(handle)) => handle.clone(),
+            (None, None) => self.profile.name.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioFormat {
     pub itag: u32,

@@ -31,6 +31,7 @@ pub struct YtMusic {
     player_cache: Option<PathBuf>,
     authed: Option<Authed>,
     authuser: usize,
+    page_id: Option<String>,
     pub(crate) resolve_cache: crate::dedup::ResolveCache,
     hl: String,
     gl: String,
@@ -72,6 +73,7 @@ impl YtMusic {
             player_cache: None,
             authed: None,
             authuser: 0,
+            page_id: None,
             resolve_cache: crate::dedup::ResolveCache::memory(),
             hl: "en".to_string(),
             gl: "US".to_string(),
@@ -80,6 +82,11 @@ impl YtMusic {
 
     pub fn as_user(mut self, authuser: usize) -> Self {
         self.authuser = authuser;
+        self
+    }
+
+    pub fn as_page(mut self, page_id: impl Into<String>) -> Self {
+        self.page_id = Some(page_id.into());
         self
     }
 
@@ -172,6 +179,9 @@ impl YtMusic {
                     .header("Authorization", authorization)
                     .header("X-Origin", origin)
                     .header("X-Goog-AuthUser", self.authuser.to_string());
+                if let Some(page) = &self.page_id {
+                    request = request.header("X-Goog-PageId", page);
+                }
             }
             None => request = request.header("X-Goog-Visitor-Id", visitor),
         }

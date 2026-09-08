@@ -1,11 +1,11 @@
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::client::YtMusic;
 use crate::context::Client;
 use crate::dedup;
-use crate::models::{Album, Playlist, Profile, Track, TrackKind};
-use crate::nav::Nav as _;
+use crate::models::{Album, Identity, Playlist, Profile, Track, TrackKind};
+use crate::nav::{Nav as _, find_all};
 use crate::parse;
 
 pub const LIKED_SONGS: &str = "LM";
@@ -172,18 +172,45 @@ impl YtMusic {
             anyhow::bail!("account menu has no active account");
         };
         log::debug!("profile: activeAccountHeaderRenderer: {account}");
-        let email = account
-            .run_text(&["channelHandle"])
-            .or_else(|| account.run_text(&["email"]));
-        let name = account
-            .run_text(&["accountName"])
-            .or_else(|| email.clone())
-            .unwrap_or_else(|| "YouTube Music".to_string());
-        Ok(Profile {
-            name,
-            email,
-            thumbnails: parse::thumbnails(account),
-        })
+        Ok(profile(account))
+    }
+    pub async fn identities(&self) -> Result<Vec<Identity>> {
+        let response = self
+            .execute(
+                "account/accounts_list",
+                Client::Web,
+                json!({ "requestType": "ACCOUNTS_LIST_REQUEST_TYPE_ACCOUNT_SWITCHER" }),
+            )
+            .await;
+        let found: Vec<Identity> = match &response {
+            Ok(response) => parse::find_renderers(response, "accountItem")
+                .into_iter()
+                .filter(|item| item.at(&["isDisabled"]).and_then(Value::as_bool) != Some(true))
+                .map(identity)
+                .collect(),
+            Err(error) => {
+                log::debug!("identities: the account switcher did not answer: {error:#}");
+                Vec::new()
+            }
+        };
+        log::debug!(
+            "identities: authuser {} sees {} in the switcher",
+            self.authuser(),
+            found.len()
+        );
+        if !found.is_empty() {
+            return Ok(found);
+        }
+        if let Ok(response) = &response {
+            log::debug!(
+                "identities: the switcher named no account, response: {}",
+                snippet(response)
+            );
+        }
+        Ok(vec![Identity {
+            profile: self.profile().await?,
+            page_id: None,
+        }])
     }
 
     async fn profile_from_accounts(&self) -> Result<Profile> {
@@ -198,22 +225,39 @@ impl YtMusic {
             anyhow::bail!("accounts list has no account");
         };
         log::debug!("profile: accountItem: {account}");
-        let email = account
-            .run_text(&["channelHandle"])
-            .or_else(|| account.run_text(&["accountByline"]));
-        let name = account
-            .run_text(&["accountName"])
-            .or_else(|| email.clone())
-            .unwrap_or_else(|| {
-                log::warn!("profile: account has no name, item: {account}");
-                "YouTube Music".to_string()
-            });
-        Ok(Profile {
-            name,
-            email,
-            thumbnails: parse::thumbnails(account),
-        })
+        Ok(profile(account))
     }
+}
+
+fn identity(item: &Value) -> Identity {
+    Identity {
+        profile: profile(item),
+        page_id: page_id(item),
+    }
+}
+
+fn profile(node: &Value) -> Profile {
+    let email = node
+        .run_text(&["channelHandle"])
+        .or_else(|| node.run_text(&["email"]))
+        .or_else(|| node.run_text(&["accountByline"]));
+    let name = node
+        .run_text(&["accountName"])
+        .or_else(|| email.clone())
+        .unwrap_or_else(|| "YouTube Music".to_string());
+    Profile {
+        name,
+        email,
+        thumbnails: parse::thumbnails(node),
+    }
+}
+
+fn page_id(item: &Value) -> Option<String> {
+    let mut found = Vec::new();
+    find_all(item, "pageIdToken", &mut found);
+    found
+        .into_iter()
+        .find_map(|token| token.str_at(&["pageId"]).map(str::to_string))
 }
 
 fn snippet(value: &serde_json::Value) -> String {
