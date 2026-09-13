@@ -37,16 +37,42 @@ pub struct YtMusic {
     gl: String,
 }
 
-/// The cookies of a signed-in account, the http client that sends them and stores the
-/// ones Google sets in response, and the file they are saved to. Guest requests use the
-/// plain client and send no cookies.
-struct Authed {
+/// A signed-in account and how its requests are authorized. Guest requests use the
+/// plain client and send no auth at all.
+enum Authed {
+    /// The cookies of a signed-in account, the http client that sends them and stores the
+    /// ones Google sets in response, and the file they are saved to.
+    Cookies {
+        http: reqwest::Client,
+        cookies: Arc<CookieStoreMutex>,
+        file: Option<PathBuf>,
+    },
+    /// A Google OAuth2 grant. Requests carry a short-lived access token, minted from the
+    /// stored refresh token and renewed when it expires.
+    OAuth(OAuth),
+}
+
+struct OAuth {
     http: reqwest::Client,
-    cookies: Arc<CookieStoreMutex>,
-    file: Option<PathBuf>,
+    refresh: String,
+    token: RwLock<Option<crate::oauth::AccessToken>>,
 }
 
 impl YtMusic {
+    /// Signs in with a Google OAuth2 refresh token obtained through the device flow.
+    /// The refresh token is persisted and reused across app restarts.
+    pub fn with_oauth(refresh_token: impl Into<String>) -> Self {
+        let http = reqwest::Client::new();
+        Self {
+            authed: Some(Authed::OAuth(OAuth {
+                http,
+                refresh: refresh_token.into(),
+                token: RwLock::new(None),
+            })),
+            ..Self::anonymous()
+        }
+    }
+
     /// Signs in with the value of a `Cookie` request header: `name=value` pairs joined by
     /// `;`. The caller removes anything else first.
     pub fn with_cookies(cookies: impl Into<String>) -> Self {
@@ -56,7 +82,7 @@ impl YtMusic {
             .build()
             .expect("reqwest client");
         Self {
-            authed: Some(Authed {
+            authed: Some(Authed::Cookies {
                 http,
                 cookies: store,
                 file: None,
@@ -103,13 +129,15 @@ impl YtMusic {
     /// Saves the signed-in cookies to `path`. An existing file replaces the pasted cookies,
     /// and every cookie Google sets afterwards is written back. Does nothing for a guest.
     pub fn persist_cookies(mut self, path: PathBuf) -> Self {
-        let Some(authed) = self.authed.as_mut() else {
+        let Some(Authed::Cookies { cookies, file, .. }) = self.authed.as_mut() else {
             return self;
         };
         if let Some(loaded) = load(&path) {
-            *authed.store() = loaded;
+            *cookies
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = loaded;
         }
-        authed.file = Some(path);
+        *file = Some(path);
         self
     }
 
@@ -159,7 +187,11 @@ impl YtMusic {
             _ => (API_BASE, "https://www.youtube.com"),
         };
         let url = format!("{base}{endpoint}?prettyPrint=false&alt=json");
-        let http = authed.map_or(&self.http, |authed| &authed.http);
+        let http = match authed {
+            Some(Authed::Cookies { http, .. }) => http,
+            Some(Authed::OAuth(oauth)) => &oauth.http,
+            None => &self.http,
+        };
         let mut request = http
             .post(&url)
             .header("Accept", "*/*")
@@ -171,8 +203,9 @@ impl YtMusic {
             .header("X-Youtube-Client-Version", client.version())
             .json(&body);
         match authed {
-            Some(authed) => {
+            Some(Authed::Cookies { .. }) => {
                 let authorization = authed
+                    .expect("matched")
                     .authorization(origin)
                     .context("cookies have no SAPISID")?;
                 request = request
@@ -182,6 +215,21 @@ impl YtMusic {
                 if let Some(page) = &self.page_id {
                     request = request.header("X-Goog-PageId", page);
                 }
+            }
+            Some(Authed::OAuth(oauth)) => {
+                let token = oauth
+                    .bearer()
+                    .await
+                    .context("cannot mint an access token")?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or(0);
+                request = request
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("X-Origin", origin)
+                    .header("X-Goog-Request-Time", now.to_string())
+                    .header("X-Goog-AuthUser", self.authuser.to_string());
             }
             None => request = request.header("X-Goog-Visitor-Id", visitor),
         }
@@ -317,9 +365,12 @@ async fn fetch_visitor(http: &reqwest::Client) -> Result<String> {
 
 impl Authed {
     fn store(&self) -> MutexGuard<'_, CookieStore> {
-        self.cookies
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        match self {
+            Authed::Cookies { cookies, .. } => cookies
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Authed::OAuth(_) => unreachable!("an oauth grant carries no cookie store"),
+        }
     }
 
     /// The `SAPISIDHASH` authorization for `origin`, computed from the SAPISID cookie in
@@ -337,9 +388,12 @@ impl Authed {
     }
 
     /// Writes the store to its file, if one is set. On failure the error is logged and the
-    /// cookies stay in memory.
+    /// cookies stay in memory. Does nothing for an oauth grant.
     fn save(&self) {
-        let Some(path) = &self.file else {
+        let Authed::Cookies { file, .. } = self else {
+            return;
+        };
+        let Some(path) = file else {
             return;
         };
         let mut body = Vec::new();
@@ -350,6 +404,23 @@ impl Authed {
         if let Err(error) = write_private(path, &body) {
             log::warn!("ytmusic: cannot save the cookies: {error:#}");
         }
+    }
+}
+
+impl OAuth {
+    /// A current access token, minted from the refresh token when the stored one is gone.
+    async fn bearer(&self) -> Result<String> {
+        let current = self.token.read().await;
+        if let Some(token) = current.as_ref()
+            && token.expires_at > std::time::Instant::now()
+        {
+            return Ok(token.token.clone());
+        }
+        let minted = crate::oauth::refresh(&self.http, &self.refresh).await?;
+        drop(current);
+        let token = minted.token.clone();
+        *self.token.write().await = Some(minted);
+        Ok(token)
     }
 }
 

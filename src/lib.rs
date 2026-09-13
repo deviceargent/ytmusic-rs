@@ -7,6 +7,7 @@ pub mod library;
 pub mod models;
 pub mod mutate;
 pub mod nav;
+pub mod oauth;
 pub mod parse;
 pub mod player;
 pub mod radio;
