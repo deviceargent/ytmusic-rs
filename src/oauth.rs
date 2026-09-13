@@ -36,7 +36,8 @@ pub struct AccessToken {
 }
 
 /// Starts the device flow. Show the instructions to the user, then call [`wait`].
-pub async fn begin(http: &reqwest::Client) -> Result<Instructions> {
+pub async fn begin() -> Result<Instructions> {
+    let http = reqwest::Client::new();
     let body = ["client_id", CLIENT_ID, "scope", SCOPE];
     let response = http
         .post(CODE_URL)
@@ -63,7 +64,8 @@ pub async fn begin(http: &reqwest::Client) -> Result<Instructions> {
 
 /// Waits until the user completes the authorization, polling at Google's pace. Returns
 /// the persistable refresh token; only errors on refusal or expiry.
-pub async fn wait(http: &reqwest::Client, instructions: &Instructions) -> Result<String> {
+pub async fn wait(instructions: &Instructions) -> Result<String> {
+    let http = reqwest::Client::new();
     loop {
         let body = [
             ("client_id", CLIENT_ID),
